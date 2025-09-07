@@ -43,7 +43,7 @@ parser.add_argument('-ic', '--include_chunks', type=str, default=None, help='Com
 parser.add_argument('-ty', '--type', type=str, default=None, help='Problem type filter')
 parser.add_argument('-l', '--level', type=str, default="Level 5", help='Problem level filter')
 parser.add_argument('-sp', '--split', type=str, default='train', choices=['train', 'test'], help='Dataset split to use')
-parser.add_argument('-p', '--provider', type=str, default="Novita", choices=['Novita', 'Together', 'Fireworks', 'Local'], help='Provider to use') # "Together"
+parser.add_argument('-p', '--provider', type=str, default="Novita", choices=['Novita', 'Together', 'Fireworks', 'Local', 'Ollama'], help='Provider to use') # "Together"
 parser.add_argument('-or', '--use_openrouter', default=False, action='store_true', help='Use OpenRouter API')
 parser.add_argument('-fp', '--frequency_penalty', type=float, default=None, help='Frequency penalty parameter')
 parser.add_argument('-pp', '--presence_penalty', type=float, default=None, help='Presence penalty parameter')
@@ -283,6 +283,24 @@ async def make_api_request(prompt: str, temperature: float, top_p: float, max_to
         }
         
         api_url = "https://api.fireworks.ai/inference/v1/completions"
+    elif args.provider == "Ollama":
+        print("Sending request to Ollama")
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+          "model": "deepseek-r1:1.5b-qwen-distill-q4_k_m",
+          "prompt" : prompt,
+          "temperature": temperature,
+          "top_p": top_p,
+          "max_tokens": max_tokens,
+          "n": 1,
+          "stream": False,
+          "raw": True
+        }
+
+        api_url = "http://localhost:11434/api/generate"
     
     # Add optional parameters for all APIs
     if args.frequency_penalty is not None:
@@ -336,7 +354,7 @@ async def make_api_request(prompt: str, temperature: float, top_p: float, max_to
                 
                 # Success case
                 result = response.json()
-                
+
                 if args.provider == "Novita" or args.provider == "Together":
                     return {
                         "text": result["choices"][0]["text"],
@@ -348,6 +366,12 @@ async def make_api_request(prompt: str, temperature: float, top_p: float, max_to
                         "text": result["choices"][0]["text"],
                         "finish_reason": result["choices"][0].get("finish_reason", ""),
                         "usage": result.get("usage", {})
+                    }
+                elif args.provider == "Ollama":
+                    return {
+                        "text": result["response"],
+                        "finish_reason": result["done_reason"],
+                        "usage": {}
                     }
                 
         except Exception as e:
@@ -458,7 +482,7 @@ async def generate_base_solution(problem: Dict, temperature: float = 0.6) -> Dic
             extracted_answers = extract_boxed_answers(solution_text)
             answer = extracted_answers[0] if extracted_answers else ""
             is_correct = False
-            
+
             if problem.get('gt_answer') and answer:
                 is_correct = check_answer(answer, problem['gt_answer'])
             
@@ -616,7 +640,7 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
             solution_text = solution_text.split("</think>")[0].strip()
     else:
         solution_text = source_text
-    
+
     # Save chunks to a separate file
     chunks_file = problem_dir / "chunks.json"
     
