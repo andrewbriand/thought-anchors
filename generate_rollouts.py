@@ -11,6 +11,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 from utils import extract_boxed_answers, check_answer, split_solution_into_chunks, load_math_problems
 from transformers import TextStreamer
+import time
 
 # Load environment variables
 load_dotenv()
@@ -78,47 +79,9 @@ if torch.cuda.is_available():
 local_model = None
 local_tokenizer = None
 
-if args.provider == "Local":
-    try:
-        print(f"Loading local model: {args.model}")
-        model = args.model.replace("deepseek/", "deepseek-ai/") # Slight adjustment we need to make
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        
-        # Load tokenizer
-        local_tokenizer = AutoTokenizer.from_pretrained(model)
-        
-        # Load model with quantization if specified
-        if args.quantize and torch.cuda.is_available():
-            from transformers import BitsAndBytesConfig
-            
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True
-            )
-            
-            local_model = AutoModelForCausalLM.from_pretrained(
-                model,
-                device_map="auto",
-                quantization_config=quantization_config,
-                torch_dtype=torch.float16,
-            )
-        else:
-            local_model = AutoModelForCausalLM.from_pretrained(
-                model,
-                device_map="auto" if torch.cuda.is_available() else None,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else None
-            )
-        
-        print("Local model loaded successfully")
-        local_model.eval()
-    except Exception as e:
-        print(f"Error loading local model: {e}")
-        exit(1)
 
+"""
 def generate_with_local_model(prompt: str, temperature: float, top_p: float, max_tokens: int) -> Dict:
-    """Generate text using a local model."""
     try:
         # Tokenize the prompt
         inputs = local_tokenizer(prompt, return_tensors="pt")
@@ -162,9 +125,12 @@ def generate_with_local_model(prompt: str, temperature: float, top_p: float, max
     except Exception as e:
         print(f"Error in local generation: {e}")
         return {"error": str(e)}
+"""
 
+
+"""
 def generate_with_local_model_batch(prompts: List[str], temperature: float, top_p: float, max_tokens: int) -> List[Dict]:
-    """Generate text using a local model in batch mode for multiple prompts."""
+    from vllm import SamplingParams
     try:
         results = []
         batch_size = args.batch_size
@@ -219,6 +185,75 @@ def generate_with_local_model_batch(prompts: List[str], temperature: float, top_
     except Exception as e:
         print(f"Error in batch generation: {e}")
         return [{"error": str(e)} for _ in range(len(prompts))]
+"""
+
+def generate_with_local_model_batch(
+    prompts: List[str],
+    temperature: float,
+    top_p: float,
+    max_tokens: int
+) -> List[Dict]:
+    from vllm import SamplingParams
+    from vllm.sampling_params import GuidedDecodingParams
+    try:
+
+        #guided_decoding_params = GuidedDecodingParams(choice=["A", "B", "C", "D", "E"])
+        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
+        #guided_decoding_params = GuidedDecodingParams(regex=".{0,10000}\n</think>\n[ABCDE]$")
+        # Build kwargs only with valid parameters
+        sampling_kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "guided_decoding": guided_decoding_params
+            #"stop": ["STOPNOW"]
+        }
+        if getattr(args, "top_k", None) is not None:
+            sampling_kwargs["top_k"] = args.top_k
+        if getattr(args, "repetition_penalty", None) is not None:
+            sampling_kwargs["repetition_penalty"] = args.repetition_penalty
+
+        sampling_params = SamplingParams(**sampling_kwargs)
+
+        outputs = []
+        batch_size = args.batch_size
+        for i in range(0, len(prompts), batch_size):
+            o = local_model.generate(prompts[i:i+batch_size], sampling_params)
+            outputs = outputs + o
+
+        results = []
+        for output in outputs:
+            generated_text = output.outputs[0].text
+            finish_reason = output.outputs[0].finish_reason
+
+            print("generated_text:", generated_text)
+
+            results.append({
+                "text": generated_text,
+                "finish_reason": finish_reason,
+                "usage": {
+                    "prompt_tokens": len(output.prompt_token_ids),
+                    "completion_tokens": len(output.outputs[0].token_ids),
+                    "total_tokens": (
+                        len(output.prompt_token_ids) +
+                        len(output.outputs[0].token_ids)
+                    )
+                }
+            })
+
+        return results
+
+    except Exception as e:
+        print(f"Error in batch generation: {e}")
+        return [{"error": str(e)} for _ in range(len(prompts))]
+
+def generate_with_local_model(
+    prompt: str,
+    temperature: float,
+    top_p: float,
+    max_tokens: int
+) -> Dict:
+  return generate_with_local_model_batch([prompt], temperature, top_p, max_tokens)[0]
 
 async def make_api_request(prompt: str, temperature: float, top_p: float, max_tokens: int) -> Dict:
     """Make an API request to either Novita, Together, Fireworks, or use a local model based on provider setting."""
@@ -468,7 +503,7 @@ async def generate_base_solution(problem: Dict, temperature: float = 0.6) -> Dic
         Dictionary with the generated solution
     """
     # Create prompt similar to generate_cots_math.py
-    prompt = f"Solve this math problem step by step. You MUST put your final answer in \\boxed{{}}. Problem: {problem['problem']} Solution: \n<think>\n"
+    prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n"
     
     max_retries = 3
     retry_delay = 2
@@ -523,7 +558,7 @@ async def generate_rollout(problem: Dict, chunk_text: str, full_cot_prefix: str,
     prefix_without_chunk = full_cot_prefix.replace(chunk_text, "").strip()
     
     # Create prompt with the prefix without the current chunk
-    prompt = f"Solve this math problem step by step. You MUST put your final answer in \\boxed{{}}. Problem: {problem['problem']} Solution: \n<think>\n{prefix_without_chunk}"
+    prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n{prefix_without_chunk}"
     
     if rollout_type == 'forced_answer':
         prompt += "\n</think>\n\nTherefore, the final answers is \\boxed{"
@@ -619,6 +654,7 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
         if args.base_solution_type == "correct" and ("is_correct" not in base_solution or not base_solution["is_correct"]):
             print(base_solution["solution"])
             print(f"Problem {problem_idx}: Base solution is INCORRECT or has error. Retrying...")
+            print("Model answer:", base_solution['answer'])
             return await process_problem(problem_idx, problem)
         elif args.base_solution_type == "incorrect" and ("is_correct" not in base_solution or base_solution["is_correct"]):
             print(base_solution["solution"])
@@ -729,15 +765,18 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
                     prefix_without_chunk = full_prefix.replace(chunk, "").strip()
                     
                     # Create prompt with the prefix without the current chunk
-                    prompt = f"Solve this math problem step by step. You MUST put your final answer in \\boxed{{}}. Problem: {problem['problem']} Solution: \n<think>\n{prefix_without_chunk}"
+                    prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n{prefix_without_chunk}"
                     
                     if args.rollout_type == 'forced_answer':
                         prompt += "\n</think>\n\nTherefore, the final answers is \\boxed{"
                     
                     prompts.append(prompt)
                 
+                start = time.time()
                 # Generate all rollouts in batch
                 batch_results = generate_with_local_model_batch(prompts, args.temperature, args.top_p, args.max_tokens)
+                end = time.time()
+                print("Rollouts took:", end - start)
                 
                 # Process results
                 new_solutions = []
@@ -791,6 +830,21 @@ async def main():
     """Main function to run the script."""
     # Load problems
     problems = load_math_problems(problem_type=args.type, level=args.level, num_problems=args.num_problems, split=args.split, include_problems=args.include_problems)
+
+    problems = [(8888, {"problem" : """The chairperson should not have released the Election Commission’s report to the public, for the chairperson did not consult any other members of the commission about releasing the report before having it released.
+
+The argument’s conclusion can be properly inferred if which one of the following is assumed?
+
+A. It would have been permissible for the chairperson to release the commission’s report to the public only if most other members of the commission had first given their consent.
+
+B. All of the members of the commission had signed the report prior to its release.
+
+C. The chairperson would not have been justified in releasing the commission’s report if any members of the commission had serious reservations about the report’s content.
+
+D. The chairperson would have been justified in releasing the report only if each of the commission’s members would have agreed to its being released had they been consulted.
+
+E. Some members of the commission would have preferred that the report not be released to the public."""
+    , "level" : "Level 5", "type" : "LSAT", "gt_answer" : "A"})]
     
     if args.exclude_problems:
         exclude_problems = [int(id) for id in args.exclude_problems.split(",")]
@@ -811,7 +865,53 @@ async def main():
         await process_problem(problem_idx, problem)
 
 if __name__ == "__main__":
+    if args.provider == "Local":
+        try:
+            print(f"Loading local model: {args.model}")
+            model = args.model.replace("deepseek/", "deepseek-ai/") # Slight adjustment we need to make
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from vllm import LLM
+
+            local_model = LLM(model=model, tensor_parallel_size=1, pipeline_parallel_size=1)
+           
+            # Load tokenizer
+            local_tokenizer = AutoTokenizer.from_pretrained(model)
+            
+            """
+            # Load model with quantization if specified
+            if args.quantize and torch.cuda.is_available():
+                from transformers import BitsAndBytesConfig
+                
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True
+                )
+                
+                local_model = AutoModelForCausalLM.from_pretrained(
+                    model,
+                    device_map="auto",
+                    quantization_config=quantization_config,
+                    torch_dtype=torch.float16,
+                )
+            else:
+                local_model = AutoModelForCausalLM.from_pretrained(
+                    model,
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else None
+                )
+            """
+            
+            print("Local model loaded successfully")
+            #local_model.eval()
+        except Exception as e:
+            print(f"Error loading local model: {e}")
+            exit(1)
+
     asyncio.run(main())
+    del local_model
+
 
 # Add this near the top of your script where you check for API keys
 if args.provider == "Novita" and not NOVITA_API_KEY:

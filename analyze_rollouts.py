@@ -95,9 +95,9 @@ plt.rcParams.update({
 load_dotenv()
 
 # Set up OpenAI API key
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-if not client.api_key:
-    raise ValueError("OPENAI_API_KEY not found in .env file")
+#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#if not client.api_key:
+#    raise ValueError("OPENAI_API_KEY not found in .env file")
 
 # Initialize the r1-distill-qwen-14b tokenizer
 tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-r1-distill-qwen-14b")
@@ -2514,7 +2514,7 @@ def process_rollouts(
             results.append(result)
     
     # Generate plots
-    category_importance = generate_plots(results, output_dir, importance_metric)
+    #category_importance = generate_plots(results, output_dir, importance_metric)
     
     # Plot chunk accuracy by position
     plot_chunk_accuracy_by_position(results, output_dir, rollout_type, max_chunks_to_show, importance_metric)
@@ -2532,13 +2532,13 @@ def process_rollouts(
     analyze_top_steps_by_category(results, output_dir, top_n=20, use_abs=True, importance_metric=importance_metric)
     
     # Analyze high z-score steps by category
-    analyze_high_zscore_steps_by_category(results, output_dir, z_threshold=1.5, use_abs=True, importance_metric=importance_metric)
+    #analyze_high_zscore_steps_by_category(results, output_dir, z_threshold=1.5, use_abs=True, importance_metric=importance_metric)
     
     # Print category importance ranking with percentages
-    if category_importance is not None and not category_importance.empty:
-        print(f"\n{rollout_type.capitalize()} Category Importance Ranking:")
-        for idx, row in category_importance.iterrows():
-            print(f"{idx+1}. {row['categories']}: {row['mean_pct']:.2f}% ± {row['se_pct']:.2f}% (n={int(row['count'])})")
+    #if category_importance is not None and not category_importance.empty:
+    #    print(f"\n{rollout_type.capitalize()} Category Importance Ranking:")
+    #    for idx, row in category_importance.iterrows():
+    #        print(f"{idx+1}. {row['categories']}: {row['mean_pct']:.2f}% ± {row['se_pct']:.2f}% (n={int(row['count'])})")
     
     # Analyze token frequencies if requested
     if get_token_frequencies:

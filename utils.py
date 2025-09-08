@@ -119,6 +119,16 @@ def extract_boxed_answers(text: str) -> List[str]:
     Returns:
         List of extracted boxed answers
     """
+    # Just return a single letter answer
+    if "</think>" not in text:
+      return [""]
+
+    answer = text.split("</think>")[1]
+    answer = re.sub(r"\s+", "", answer)
+    print("Extracted answer: ", answer)
+
+    return [answer]
+    
     # Find all occurrences of \boxed{
     boxed_starts = [m.start() for m in re.finditer(r"\\boxed\{", text)]
 
