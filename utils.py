@@ -125,7 +125,7 @@ def extract_boxed_answers(text: str) -> List[str]:
 
     answer = text.split("</think>")[1]
     answer = re.sub(r"\s+", "", answer)
-    print("Extracted answer: ", answer)
+    #print("Extracted answer: ", answer)
 
     return [answer]
     
@@ -385,6 +385,7 @@ def split_solution_into_chunks(solution_text: str) -> List[str]:
     if "</think>" in solution_text:
         solution_text = solution_text.split("</think>")[0].strip()
 
+    #print("solution_text:", solution_text)
     # Define patterns for chunk boundaries
     sentence_ending_tokens = [".", "?", "!"]
     paragraph_ending_patterns = ["\n\n", "\r\n\r\n"]
@@ -422,6 +423,12 @@ def split_solution_into_chunks(solution_text: str) -> List[str]:
                 current_chunk = ""
 
         i += 1
+
+
+    #print("current_chunk:", current_chunk)
+    if current_chunk != "":
+      chunks.append(current_chunk)
+    #print("chunks:", chunks)
 
     # # Add the last chunk if not empty
     # if current_chunk.strip():

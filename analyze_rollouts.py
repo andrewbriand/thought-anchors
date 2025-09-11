@@ -65,7 +65,7 @@ parser.add_argument('-st', '--similarity_threshold', type=float, default=0.8, he
 parser.add_argument('-bs', '--batch_size', type=int, default=8192, help='Batch size for embedding model')
 parser.add_argument('-us', '--use_similar_chunks', default=True, action='store_true', help='Use similar chunks for importance calculation')
 parser.add_argument('-np', '--num_processes', type=int, default=min(100, mp.cpu_count()), help='Number of parallel processes for chunk processing')
-parser.add_argument('-pt', '--use_prob_true', default=False, action='store_false', help='Use probability of correct answer (P(true)) instead of answer distribution for KL divergence calculations')
+parser.add_argument('-pt', '--use_prob_true', default=True, action='store_false', help='Use probability of correct answer (P(true)) instead of answer distribution for KL divergence calculations')
 args = parser.parse_args()
 
 # Set consistent font size for all plots
@@ -412,9 +412,12 @@ def calculate_counterfactual_importance_kl(chunk_idx, chunk_info, chunk_embeddin
     
     # Get current chunk solutions
     current_solutions = chunk_info[chunk_idx]
+
+    #print("current_solutions:", current_solutions)
     
     # Get next chunk solutions (these will be the similar solutions)
     next_solutions = chunk_info.get(next_chunk_idx, [])
+    #print("next_solutions", next_solutions)
     
     # For dissimilar solutions, we'll use current solutions where resampled chunk is semantically different from removed chunk
     dissimilar_solutions = []
@@ -550,6 +553,8 @@ def calculate_resampling_importance_kl(chunk_idx, chunk_info, problem_dir):
     """
     if chunk_idx not in chunk_info:
         return 0.0
+
+    print("chunk_idx:", chunk_idx)
     
     # Find next chunks
     next_chunks = [idx for idx in chunk_info.keys() if idx > chunk_idx]
@@ -588,6 +593,9 @@ def calculate_resampling_importance_kl(chunk_idx, chunk_info, problem_dir):
     
     if not chunk_sols1 or not chunk_sols2:
         return 0.0
+
+    #print("chunk_sols1:", chunk_sols1)
+    #print("chunk_sols2:", chunk_sols2)
         
     # Calculate KL divergence
     return calculate_kl_divergence(chunk_sols1, chunk_sols2, use_prob_true=args.use_prob_true)
@@ -750,6 +758,9 @@ def calculate_kl_divergence(chunk_sols1, chunk_sols2, laplace_smooth=False, use_
             answer = normalize_answer(sol.get("answer", ""))
             if answer:
                 answer_counts2[answer] += 1
+
+        print("answer_counts1:", list(sorted(answer_counts1.items(), key=lambda x : x[0])))
+        print("answer_counts2:", list(sorted(answer_counts2.items(), key=lambda x : x[0])))
         
         # Early return if either set is empty
         if not answer_counts1 or not answer_counts2:

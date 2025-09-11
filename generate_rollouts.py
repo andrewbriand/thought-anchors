@@ -79,114 +79,6 @@ if torch.cuda.is_available():
 local_model = None
 local_tokenizer = None
 
-
-"""
-def generate_with_local_model(prompt: str, temperature: float, top_p: float, max_tokens: int) -> Dict:
-    try:
-        # Tokenize the prompt
-        inputs = local_tokenizer(prompt, return_tensors="pt")
-        
-        # Move inputs to GPU if available
-        if torch.cuda.is_available():
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
-            
-        # Create a streamer that shows progress
-        streamer = TextStreamer(local_tokenizer, skip_special_tokens=True)
-        
-        # Set up generation parameters
-        generation_config = {
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "do_sample": temperature > 0,
-            "use_cache": True,
-            "pad_token_id": local_tokenizer.eos_token_id,
-            "streamer": streamer
-        }
-        
-        # Add optional parameters
-        if args.top_k is not None:
-            generation_config["top_k"] = args.top_k
-        if args.repetition_penalty is not None:
-            generation_config["repetition_penalty"] = args.repetition_penalty
-        
-        # Generate
-        with torch.no_grad():
-            outputs = local_model.generate(**inputs, **generation_config)
-        
-        # Decode the generated text
-        generated_text = local_tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        
-        return {
-            "text": generated_text,
-            "finish_reason": "stop",  # Simplified
-            "usage": {"total_tokens": len(outputs[0])}
-        }
-    except Exception as e:
-        print(f"Error in local generation: {e}")
-        return {"error": str(e)}
-"""
-
-
-"""
-def generate_with_local_model_batch(prompts: List[str], temperature: float, top_p: float, max_tokens: int) -> List[Dict]:
-    from vllm import SamplingParams
-    try:
-        results = []
-        batch_size = args.batch_size
-        
-        # Process prompts in batches
-        for i in range(0, len(prompts), batch_size):
-            batch_prompts = prompts[i:i+batch_size]
-            print(f"Processing batch {i//batch_size + 1}/{(len(prompts) + batch_size - 1)//batch_size}")
-            
-            # Tokenize all prompts in the batch
-            batch_inputs = local_tokenizer(batch_prompts, padding=True, return_tensors="pt")
-            
-            # Move inputs to GPU if available
-            if torch.cuda.is_available():
-                batch_inputs = {k: v.to("cuda") for k, v in batch_inputs.items()}
-            
-            # Set up generation parameters
-            generation_config = {
-                "max_new_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "do_sample": temperature > 0,
-                "use_cache": True,
-                "pad_token_id": local_tokenizer.eos_token_id
-            }
-            
-            # Add optional parameters
-            if args.top_k is not None:
-                generation_config["top_k"] = args.top_k
-            if args.repetition_penalty is not None:
-                generation_config["repetition_penalty"] = args.repetition_penalty
-            
-            # Generate
-            with torch.no_grad():
-                batch_outputs = local_model.generate(**batch_inputs, **generation_config)
-            
-            # Process each output in the batch
-            for j, (input_ids, output_ids) in enumerate(zip(batch_inputs["input_ids"], batch_outputs)):
-                # Find where the generated text starts (after the prompt)
-                input_length = len(input_ids)
-                
-                # Decode the generated text
-                generated_text = local_tokenizer.decode(output_ids[input_length:], skip_special_tokens=True)
-                
-                results.append({
-                    "text": generated_text,
-                    "finish_reason": "stop",  # Simplified
-                    "usage": {"total_tokens": len(output_ids)}
-                })
-        
-        return results
-    except Exception as e:
-        print(f"Error in batch generation: {e}")
-        return [{"error": str(e)} for _ in range(len(prompts))]
-"""
-
 def generate_with_local_model_batch(
     prompts: List[str],
     temperature: float,
@@ -201,45 +93,48 @@ def generate_with_local_model_batch(
         guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
         #guided_decoding_params = GuidedDecodingParams(regex=".{0,10000}\n</think>\n[ABCDE]$")
         # Build kwargs only with valid parameters
-        sampling_kwargs = {
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-            "guided_decoding": guided_decoding_params
-            #"stop": ["STOPNOW"]
-        }
-        if getattr(args, "top_k", None) is not None:
-            sampling_kwargs["top_k"] = args.top_k
-        if getattr(args, "repetition_penalty", None) is not None:
-            sampling_kwargs["repetition_penalty"] = args.repetition_penalty
-
-        sampling_params = SamplingParams(**sampling_kwargs)
-
-        outputs = []
-        batch_size = args.batch_size
-        for i in range(0, len(prompts), batch_size):
-            o = local_model.generate(prompts[i:i+batch_size], sampling_params)
-            outputs = outputs + o
-
         results = []
-        for output in outputs:
-            generated_text = output.outputs[0].text
-            finish_reason = output.outputs[0].finish_reason
+        batch_size = args.batch_size
+ 
+        for i in range(0, len(prompts), batch_size):
+            my_size = min(len(prompts) - i, batch_size)
+            sampling_kwargs = {
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_tokens": max_tokens,
+                "guided_decoding": guided_decoding_params,
+                "n": my_size,
+                "seed": args.seed
+            }
+            if getattr(args, "top_k", None) is not None:
+                sampling_kwargs["top_k"] = args.top_k
+            if getattr(args, "repetition_penalty", None) is not None:
+                sampling_kwargs["repetition_penalty"] = args.repetition_penalty
 
-            print("generated_text:", generated_text)
+            sampling_params = SamplingParams(**sampling_kwargs)
 
-            results.append({
-                "text": generated_text,
-                "finish_reason": finish_reason,
-                "usage": {
-                    "prompt_tokens": len(output.prompt_token_ids),
-                    "completion_tokens": len(output.outputs[0].token_ids),
-                    "total_tokens": (
-                        len(output.prompt_token_ids) +
-                        len(output.outputs[0].token_ids)
-                    )
-                }
-            })
+            outputs = local_model.generate([prompts[0]], sampling_params)
+
+            print("max output tokens: ",  max([len(o.token_ids) for o in outputs[0].outputs]))
+            print("min output tokens: ",  min([len(o.token_ids) for o in outputs[0].outputs]))
+            print("sum output tokens: ",  sum([len(o.token_ids) for o in outputs[0].outputs]))
+
+            for output in outputs[0].outputs:
+                generated_text = output.text
+                finish_reason = output.finish_reason
+
+                results.append({
+                    "text": generated_text,
+                    "finish_reason": finish_reason,
+                    "usage": {
+                        "prompt_tokens": len(outputs[0].prompt_token_ids),
+                        "completion_tokens": len(output.token_ids),
+                        "total_tokens": (
+                            len(outputs[0].prompt_token_ids) +
+                            len(output.token_ids)
+                        )
+                    }
+                })
 
         return results
 
@@ -790,6 +685,7 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
                     
                     # Create the rollout object
                     prefix_without_chunk = full_prefix.replace(chunk, "").strip()
+                    #print("rollout text:", rollout_text)
                     chunk_resampled = split_solution_into_chunks(rollout_text)[0] if rollout_text else ""
                     
                     # Extract answer and check correctness
@@ -872,7 +768,8 @@ if __name__ == "__main__":
             from transformers import AutoModelForCausalLM, AutoTokenizer
             from vllm import LLM
 
-            local_model = LLM(model=model, tensor_parallel_size=1, pipeline_parallel_size=1)
+            local_model = LLM(model=model, tensor_parallel_size=1, pipeline_parallel_size=1, disable_cascade_attn=True)
+            #print("CASCADE_ATTN_ENABLED:", local_model.cascade_attn_enabled)
            
             # Load tokenizer
             local_tokenizer = AutoTokenizer.from_pretrained(model)
