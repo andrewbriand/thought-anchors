@@ -79,6 +79,73 @@ if torch.cuda.is_available():
 local_model = None
 local_tokenizer = None
 
+def generate_with_local_model_batch_multi_chunk(
+    prompts: List[str],
+    n: int, 
+    temperature: float,
+    top_p: float,
+    max_tokens: int
+) -> List[Dict]:
+    from vllm import SamplingParams
+    from vllm.sampling_params import GuidedDecodingParams
+    try:
+
+        #guided_decoding_params = GuidedDecodingParams(choice=["A", "B", "C", "D", "E"])
+        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
+        #guided_decoding_params = GuidedDecodingParams(regex=".{0,10000}\n</think>\n[ABCDE]$")
+        # Build kwargs only with valid parameters
+        results = []
+ 
+        sampling_kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "guided_decoding": guided_decoding_params,
+            "n": n,
+            "seed": args.seed
+        }
+        if getattr(args, "top_k", None) is not None:
+            sampling_kwargs["top_k"] = args.top_k
+        if getattr(args, "repetition_penalty", None) is not None:
+            sampling_kwargs["repetition_penalty"] = args.repetition_penalty
+
+        sampling_params = SamplingParams(**sampling_kwargs)
+
+        outputs = local_model.generate(prompts, sampling_params)
+
+        print("outputs: ", len(outputs))
+
+        print("max output tokens: ",  max([len(o.token_ids) for o in outputs[0].outputs]))
+        print("min output tokens: ",  min([len(o.token_ids) for o in outputs[0].outputs]))
+        print("sum output tokens: ",  sum([len(o.token_ids) for o in outputs[0].outputs]))
+
+        results = []
+
+        for i in range(len(outputs)):
+            results.append([])
+            for output in outputs[i].outputs:
+                generated_text = output.text
+                finish_reason = output.finish_reason
+
+                results[-1].append({
+                    "text": generated_text,
+                    "finish_reason": finish_reason,
+                    "usage": {
+                        "prompt_tokens": len(outputs[i].prompt_token_ids),
+                        "completion_tokens": len(output.token_ids),
+                        "total_tokens": (
+                            len(outputs[i].prompt_token_ids) +
+                            len(output.token_ids)
+                        )
+                    }
+                })
+
+        return results
+
+    except Exception as e:
+        print(f"Error in batch generation: {e}")
+        return [{"error": str(e)} for _ in range(len(prompts))]
+
 def generate_with_local_model_batch(
     prompts: List[str],
     temperature: float,
@@ -598,7 +665,95 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
     for chunk in chunks:
         current_cumulative += chunk + " "
         cumulative_chunks.append(current_cumulative.strip())
+
+    # Attempt to process chunks in batches of 10 chunks
+    chunk_batch = 10
+    for chunk_idx in range(0, len(chunks), chunk_batch):
+        chunk_idx_end = min(len(chunks), chunk_idx + chunk_batch)
+        chunks_to_generate = []
+        for chunk_idx_in_batch in range(chunk_idx, chunk_idx_end):
+            chunk_dir = problem_dir / f"chunk_{chunk_idx_in_batch}"
+            chunk_dir.mkdir(exist_ok=True, parents=True)
+            solutions_file = chunk_dir / "solutions.json"
+            existing_solutions = []
+            valid_existing_solutions = []
+            if solutions_file.exists() and not args.force:
+                with open(solutions_file, 'r', encoding='utf-8') as f:
+                    existing_solutions = json.load(f)
+                    valid_existing_solutions = [s for s in existing_solutions if 'answer' in s and 'error' not in s]
+            valid_count = len(valid_existing_solutions)
+
+            # Since we're generating in large batches, just redo all the rollouts if some are missing
+            if valid_count < args.num_rollouts:
+                chunks_to_generate.append((chunk_idx_in_batch, chunks[chunk_idx_in_batch]))
+        print("Processing", len(chunks_to_generate), "chunks in one batch")
+
+        prompts = []
+        for chunk_idx_in_batch, chunk in chunks_to_generate:
+            full_prefix = cumulative_chunks[chunk_idx_in_batch]
+            # Remove the current chunk from the prefix to see how it gets regenerated
+            prefix_without_chunk = full_prefix.replace(chunk, "").strip()
+                    
+            # Create prompt with the prefix without the current chunk
+            prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n{prefix_without_chunk}"
+                    
+            if args.rollout_type == 'forced_answer':
+                prompt += "\n</think>\n\nTherefore, the final answers is \\boxed{"
+                    
+            prompts.append(prompt)
+                
+        start = time.time()
+        # Generate all rollouts in batch
+        batch_results = generate_with_local_model_batch_multi_chunk(prompts, args.num_rollouts, args.temperature, args.top_p, args.max_tokens)
+        end = time.time()
+        print("Rollouts took:", end - start)
+        
+        for chunk_result, (chunk_idx_in_batch, chunk), prompt in zip(batch_results, chunks_to_generate, prompts):
+            chunk_dir = problem_dir / f"chunk_{chunk_idx_in_batch}"
+            chunk_dir.mkdir(exist_ok=True, parents=True)
+            solutions_file = chunk_dir / "solutions.json"
+            # Process results
+            new_solutions = []
+            for i, result in enumerate(chunk_result):
+                rollout_text = result.get('text', '')
+                
+                # Skip if there was an error
+                if 'error' in result:
+                    new_solutions.append({"error": result['error']})
+                    continue
+
+                full_prefix = cumulative_chunks[chunk_idx_in_batch]
+                
+                # Create the rollout object
+                prefix_without_chunk = full_prefix.replace(chunk, "").strip()
+                #print("rollout text:", rollout_text)
+                chunk_resampled = split_solution_into_chunks(rollout_text)[0] if rollout_text else ""
+                
+                # Extract answer and check correctness
+                extracted_answers = extract_boxed_answers(f"{prompt}{rollout_text}" if args.rollout_type == 'forced_answer' else rollout_text)
+                answer = extracted_answers[0] if extracted_answers else ""
+                is_correct = False
+                
+                if problem.get('gt_answer') and answer:
+                    is_correct = check_answer(answer, problem['gt_answer'])
+                
+                new_solutions.append({
+                    "chunk_removed": chunk,
+                    "prefix_without_chunk": prefix_without_chunk,
+                    "chunk_resampled": chunk_resampled,
+                    "rollout": rollout_text,
+                    "full_cot": f"{prompt}{rollout_text}",
+                    "answer": answer,
+                    "is_correct": is_correct
+                })
+            # Save all solutions
+            with open(solutions_file, 'w', encoding='utf-8') as f:
+                json.dump(new_solutions, f, indent=2)
+
+        
     
+    
+    """
     # Process each chunk
     for chunk_idx, (chunk, full_prefix) in enumerate(zip(chunks, cumulative_chunks)):
         if args.include_chunks and str(chunk_idx) not in args.include_chunks.split(","):
@@ -721,6 +876,7 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
             print(f"Problem {problem_idx}, Chunk {chunk_idx}: Saved {len(all_solutions)} solutions")
         else:
             print(f"Problem {problem_idx}, Chunk {chunk_idx}: Already have {len(valid_existing_solutions)} valid solutions")
+    """
 
 async def main():
     """Main function to run the script."""
