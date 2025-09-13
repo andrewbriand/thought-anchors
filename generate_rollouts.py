@@ -56,6 +56,7 @@ parser.add_argument('-q', '--quantize', default=False, action='store_true', help
 parser.add_argument('-bs', '--batch_size', type=int, default=8, help='Batch size for local model')
 parser.add_argument('-mr', '--max_retries', type=int, default=1, help='Maximum number of retries for API requests')
 parser.add_argument('-os', '--output_suffix', type=str, default=None, help='Suffix to add to the output directory')
+parser.add_argument('-mmlu', '--mmlu', type=str, default=None, help='Path to MMLU question JSON')
 args = parser.parse_args()
 
 # Create output directory
@@ -91,7 +92,8 @@ def generate_with_local_model_batch_multi_chunk(
     try:
 
         #guided_decoding_params = GuidedDecodingParams(choice=["A", "B", "C", "D", "E"])
-        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
+        #guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
+        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\nThe correct answer is [ABCDEFGHIJ]")
         #guided_decoding_params = GuidedDecodingParams(regex=".{0,10000}\n</think>\n[ABCDE]$")
         # Build kwargs only with valid parameters
         results = []
@@ -102,7 +104,7 @@ def generate_with_local_model_batch_multi_chunk(
             "max_tokens": max_tokens,
             "guided_decoding": guided_decoding_params,
             "n": n,
-            "seed": args.seed
+            #"seed": args.seed
         }
         if getattr(args, "top_k", None) is not None:
             sampling_kwargs["top_k"] = args.top_k
@@ -157,7 +159,7 @@ def generate_with_local_model_batch(
     try:
 
         #guided_decoding_params = GuidedDecodingParams(choice=["A", "B", "C", "D", "E"])
-        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\n[ABCDE]")
+        guided_decoding_params = GuidedDecodingParams(regex="[^<]*</think>\nThe correct answer is [ABCDEFGHIJ]")
         #guided_decoding_params = GuidedDecodingParams(regex=".{0,10000}\n</think>\n[ABCDE]$")
         # Build kwargs only with valid parameters
         results = []
@@ -171,7 +173,7 @@ def generate_with_local_model_batch(
                 "max_tokens": max_tokens,
                 "guided_decoding": guided_decoding_params,
                 "n": my_size,
-                "seed": args.seed
+                #"seed": args.seed
             }
             if getattr(args, "top_k", None) is not None:
                 sampling_kwargs["top_k"] = args.top_k
@@ -465,7 +467,10 @@ async def generate_base_solution(problem: Dict, temperature: float = 0.6) -> Dic
         Dictionary with the generated solution
     """
     # Create prompt similar to generate_cots_math.py
-    prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n"
+    prompt = f"<|im_start|>user\nAnswer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:<|im_end|>\n<|im_start|>assistant\n<think>"
+
+    print(prompt)
+    print("CORRECT ANSWER:", problem['gt_answer'])
     
     max_retries = 3
     retry_delay = 2
@@ -520,7 +525,7 @@ async def generate_rollout(problem: Dict, chunk_text: str, full_cot_prefix: str,
     prefix_without_chunk = full_cot_prefix.replace(chunk_text, "").strip()
     
     # Create prompt with the prefix without the current chunk
-    prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n{prefix_without_chunk}"
+    prompt = f"<|im_start|>user\nAnswer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:<|im_end|>\n<|im_start|>assistant\n<think>\n{prefix_without_chunk}"
     
     if rollout_type == 'forced_answer':
         prompt += "\n</think>\n\nTherefore, the final answers is \\boxed{"
@@ -695,7 +700,7 @@ async def process_problem(problem_idx: int, problem: Dict) -> None:
             prefix_without_chunk = full_prefix.replace(chunk, "").strip()
                     
             # Create prompt with the prefix without the current chunk
-            prompt = f"Answer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:\n<think>\n{prefix_without_chunk}"
+            prompt = f"<|im_start|>user\nAnswer this question step by step with only a single letter. Problem: {problem['problem']}\n\nAnswer with only a single letter. Answer:<|im_end|>\n<|im_start|>assistant\n<think>\n{prefix_without_chunk}"
                     
             if args.rollout_type == 'forced_answer':
                 prompt += "\n</think>\n\nTherefore, the final answers is \\boxed{"
@@ -883,20 +888,17 @@ async def main():
     # Load problems
     problems = load_math_problems(problem_type=args.type, level=args.level, num_problems=args.num_problems, split=args.split, include_problems=args.include_problems)
 
-    problems = [(8888, {"problem" : """The chairperson should not have released the Election Commission’s report to the public, for the chairperson did not consult any other members of the commission about releasing the report before having it released.
+    with open(args.mmlu) as f:
+      loaded = json.load(f)
 
-The argument’s conclusion can be properly inferred if which one of the following is assumed?
-
-A. It would have been permissible for the chairperson to release the commission’s report to the public only if most other members of the commission had first given their consent.
-
-B. All of the members of the commission had signed the report prior to its release.
-
-C. The chairperson would not have been justified in releasing the commission’s report if any members of the commission had serious reservations about the report’s content.
-
-D. The chairperson would have been justified in releasing the report only if each of the commission’s members would have agreed to its being released had they been consulted.
-
-E. Some members of the commission would have preferred that the report not be released to the public."""
-    , "level" : "Level 5", "type" : "LSAT", "gt_answer" : "A"})]
+    problems = []
+    letters = 'ABCDEFGHIJ'
+    for i, p in enumerate(loaded):
+      problem = {}
+      answers = '\n\n'.join([letters[j] + ". " + o for j, o in enumerate(p["options"])])
+      problem["problem"] = f"{p['question']}\n\n{answers}"
+      problem["gt_answer"] = p["answer"] 
+      problems.append((i, problem))
     
     if args.exclude_problems:
         exclude_problems = [int(id) for id in args.exclude_problems.split(",")]

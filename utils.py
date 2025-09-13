@@ -124,7 +124,7 @@ def extract_boxed_answers(text: str) -> List[str]:
       return [""]
 
     answer = text.split("</think>")[1]
-    answer = re.sub(r"\s+", "", answer)
+    answer = re.sub(r"\s+The correct answer is\s+", "", answer)
     #print("Extracted answer: ", answer)
 
     return [answer]
